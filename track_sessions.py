@@ -42,6 +42,24 @@ def fetch_session_ids():
     return set(ids)
 
 
+def debug_dump_context():
+    """
+    Temporary helper, not used by the normal alert flow. Prints a chunk
+    of raw HTML around the first sessionId it finds, so we can see what
+    surrounds it (dates, times, etc are likely nearby as data attributes
+    or JSON, even if not visible as plain text on the page).
+    """
+    response = requests.get(CINEMA_URL, headers=HEADERS, timeout=20)
+    response.raise_for_status()
+    match = re.search(r"sessionId=\d+", response.text)
+    if not match:
+        print("No sessionId found in the page at all.")
+        return
+    start = max(0, match.start() - 1500)
+    end = min(len(response.text), match.end() + 500)
+    print(response.text[start:end])
+
+
 def load_known_ids():
     if STATE_FILE.exists():
         return set(json.loads(STATE_FILE.read_text()))
@@ -82,4 +100,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    debug_dump_context()
+    # main()
