@@ -1,11 +1,15 @@
 """
-Tracks the IMAX Sydney "now showing" page for new session IDs and sends
-an alert when one appears that wasn't seen on the previous check.
+Tracks the IMAX Sydney "now showing" page for new sessions and sends a
+Discord alert, including the film name and session date/time, when one
+appears that wasn't seen on the previous check.
 
 How it works:
 1. Fetches the cinema page.
-2. Pulls out every sessionId from the booking links on the page.
-3. Compares that set against the IDs saved from the last run.
+2. Pulls the structured session data out of the page's embedded JSON-LD
+   (a script tag the site itself uses for search engines), which includes
+   the session ID, film name, and start time for every showing.
+3. Compares the current set of session IDs against the IDs saved from the
+   last run.
 4. Any ID not seen before triggers an alert and gets saved for next time.
 
 Run this on a schedule (cron, GitHub Actions, etc). Every 30 minutes is
@@ -15,7 +19,9 @@ a reasonable starting point, no need to go faster than that.
 import json
 import os
 import re
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -33,31 +39,60 @@ HEADERS = {
     )
 }
 
-
-def fetch_session_ids():
-    response = requests.get(CINEMA_URL, headers=HEADERS, timeout=20)
-    response.raise_for_status()
-    # Session IDs appear in booking links like ?sessionId=15434269
-    ids = re.findall(r"sessionId=(\d+)", response.text)
-    return set(ids)
+SYDNEY = ZoneInfo("Australia/Sydney")
 
 
-def debug_dump_context():
+def fetch_sessions():
     """
-    Temporary helper, not used by the normal alert flow. Prints a chunk
-    of raw HTML around the first sessionId it finds, so we can see what
-    surrounds it (dates, times, etc are likely nearby as data attributes
-    or JSON, even if not visible as plain text on the page).
+    Returns a dict of {session_id: {"film": ..., "start": <formatted string>}}
+    pulled from the page's embedded JSON-LD ScreeningEvent data.
     """
     response = requests.get(CINEMA_URL, headers=HEADERS, timeout=20)
     response.raise_for_status()
-    match = re.search(r"sessionId=\d+", response.text)
-    if not match:
-        print("No sessionId found in the page at all.")
-        return
-    start = max(0, match.start() - 1500)
-    end = min(len(response.text), match.end() + 500)
-    print(response.text[start:end])
+    html = response.text
+
+    sessions = {}
+    for block in re.finditer(
+        r'<script type="application/ld\+json">\s*(\[.*?\])\s*</script>',
+        html,
+        re.DOTALL,
+    ):
+        try:
+            events = json.loads(block.group(1))
+        except json.JSONDecodeError:
+            continue
+
+        for event in events:
+            if event.get("@type") != "ScreeningEvent":
+                continue
+
+            url = event.get("url", "")
+            id_match = re.search(r"sessionId=(\d+)", url)
+            if not id_match:
+                continue
+
+            session_id = id_match.group(1)
+            sessions[session_id] = {
+                "film": event.get("name", "unknown film"),
+                "start": format_session_time(event.get("startDate")),
+            }
+
+    return sessions
+
+
+def format_session_time(iso_string):
+    if not iso_string:
+        return "unknown time"
+    try:
+        # Takes the first 19 characters, e.g. "2026-07-31T11:30:00",
+        # ignoring fractional seconds and the trailing Z, since the value
+        # is always given in UTC.
+        dt_utc = datetime.strptime(iso_string[:19], "%Y-%m-%dT%H:%M:%S")
+        dt_utc = dt_utc.replace(tzinfo=ZoneInfo("UTC"))
+        dt_sydney = dt_utc.astimezone(SYDNEY)
+        return dt_sydney.strftime("%A %d %B, %I:%M %p").replace(" 0", " ")
+    except ValueError:
+        return iso_string
 
 
 def load_known_ids():
@@ -70,8 +105,12 @@ def save_known_ids(ids):
     STATE_FILE.write_text(json.dumps(sorted(ids)))
 
 
-def send_alert(new_ids):
-    message = f"New IMAX Sydney session(s) for The Odyssey: {', '.join(new_ids)}"
+def send_alert(new_sessions):
+    lines = [
+        f"{info['film']}, {info['start']}"
+        for info in new_sessions.values()
+    ]
+    message = "New IMAX Sydney session(s):\n" + "\n".join(lines)
     print(message)
 
     if not DISCORD_WEBHOOK_URL:
@@ -83,13 +122,15 @@ def send_alert(new_ids):
 
 
 def main():
-    current_ids = fetch_session_ids()
+    sessions = fetch_sessions()
+    current_ids = set(sessions.keys())
     known_ids = load_known_ids()
 
     new_ids = current_ids - known_ids
 
     if new_ids:
-        send_alert(new_ids)
+        new_sessions = {sid: sessions[sid] for sid in new_ids}
+        send_alert(new_sessions)
     else:
         print("No new sessions.")
 
@@ -100,5 +141,4 @@ def main():
 
 
 if __name__ == "__main__":
-    debug_dump_context()
-    # main()
+    main()
