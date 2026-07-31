@@ -1,1 +1,35 @@
+name: Check IMAX Sydney sessions
+
+on:
+  schedule:
+    # Runs every 30 minutes. GitHub can run a bit late during busy periods,
+    # so treat this as "roughly every 30 minutes", not exact.
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}  # lets you trigger it manually from the Actions tab
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run tracker
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python track_sessions.py
+
+      - name: Save updated session state
+        run: |
+          git config user.name "session-tracker-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add known_sessions.json
+          git diff --quiet --cached || git commit -m "Update known sessions"
+          git push
 
